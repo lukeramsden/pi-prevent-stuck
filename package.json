@@ -1,0 +1,49 @@
+{
+  "name": "@lukeramsden/pi-prevent-stuck",
+  "version": "1.0.0",
+  "description": "Extension for the pi coding agent: prevent shell commands that commonly hang agents by blocking interactive editors, pagers, REPLs, watch/TUI commands, prompt-only logins, and interactive git rebase.",
+  "license": "MIT",
+  "author": "lukeramsden",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lukeramsden/pi-prevent-stuck.git"
+  },
+  "homepage": "https://github.com/lukeramsden/pi-prevent-stuck#readme",
+  "bugs": "https://github.com/lukeramsden/pi-prevent-stuck/issues",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "non-interactive",
+    "automation",
+    "git",
+    "stuck"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && node scripts/verify.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "jiti": "2.7.0",
+    "typescript": "^5.9.0"
+  }
+}
