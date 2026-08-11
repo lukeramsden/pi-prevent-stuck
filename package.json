@@ -1,6 +1,6 @@
 {
   "name": "@lukeramsden/pi-prevent-stuck",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Extension for the pi coding agent: prevent shell commands that commonly hang agents by blocking interactive editors, pagers, REPLs, watch/TUI commands, prompt-only logins, and interactive git rebase.",
   "license": "MIT",
   "author": "lukeramsden",
