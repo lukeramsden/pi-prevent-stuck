@@ -71,8 +71,81 @@ export type PreventStuckDecision =
 	| { action: "rewrite"; command: string }
 	| { action: "block"; reason: string };
 
+/**
+ * Blank out heredoc bodies and the contents of quoted strings so that text
+ * that merely *mentions* a command (a commit message, an echo, a script fed
+ * via heredoc) is never mistaken for running it. Quote characters are kept so
+ * token boundaries survive; the length of the command is otherwise unchanged.
+ */
+export function maskNonCommandText(command: string): string {
+	let out = "";
+	let i = 0;
+	while (i < command.length) {
+		const ch = command[i];
+		if (ch === "\\" && i + 1 < command.length) {
+			out += "\\" + (command[i + 1] === "\n" ? "\n" : " ");
+			i += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			const end = findQuoteEnd(command, i);
+			const inner = command.slice(i + 1, end);
+			// A quoted single word (e.g. '/usr/bin/python3') can still be a command
+			// name; anything with whitespace or separators is data, so blank it.
+			const masked = /[\s;|&()`$<>]/.test(inner) ? inner.replace(/[^\n]/g, " ") : inner;
+			out += ch + masked + (end < command.length ? ch : "");
+			i = end + 1;
+			continue;
+		}
+		if (ch === "<" && command[i + 1] === "<") {
+			const m = /^<<-?\s*(?:'([^']+)'|"([^"]+)"|(\\?[A-Za-z_][\w-]*))/.exec(command.slice(i));
+			if (m) {
+				const delim = (m[1] ?? m[2] ?? m[3]).replace(/^\\/, "");
+				out += m[0];
+				i += m[0].length;
+				// Copy the rest of the current line verbatim, then blank lines until the delimiter.
+				const nl = command.indexOf("\n", i);
+				if (nl < 0) {
+					out += command.slice(i);
+					break;
+				}
+				out += command.slice(i, nl + 1);
+				i = nl + 1;
+				while (i < command.length) {
+					const lineEnd = command.indexOf("\n", i);
+					const line = command.slice(i, lineEnd < 0 ? command.length : lineEnd);
+					const consumed = line.length + (lineEnd < 0 ? 0 : 1);
+					if (line.replace(/^\t+/, "") === delim) {
+						out += command.slice(i, i + consumed);
+						i += consumed;
+						break;
+					}
+					out += " ".repeat(line.length) + (lineEnd < 0 ? "" : "\n");
+					i += consumed;
+				}
+				continue;
+			}
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
+
+function findQuoteEnd(s: string, start: number): number {
+	const q = s[start];
+	for (let j = start + 1; j < s.length; j++) {
+		if (q === '"' && s[j] === "\\") {
+			j++;
+			continue;
+		}
+		if (s[j] === q) return j;
+	}
+	return s.length;
+}
+
 function splitSegments(command: string): string[] {
-	return command.split(/&&|\|\||[;|()&\n`]|`|\$\(/);
+	return maskNonCommandText(command).split(/&&|\|\||[;|()&\n`]|`|\$\(/);
 }
 
 function tokens(segment: string): string[] {

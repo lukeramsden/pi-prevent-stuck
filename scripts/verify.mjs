@@ -105,7 +105,25 @@ const allowed = [
 	// errors out: "cannot perform an interactive login from a non-TTY device"
 	"docker login -u luke",
 	"docker login --username foo --password-stdin < token.txt",
+	// mentions of blocked commands inside data, not in command position
+	'git commit -m "Stop blocking vim; keep git rebase -i and fzf"',
+	"git commit -m 'use top -l 1 instead of top'",
+	'echo "run vim src/app.ts to edit"',
+	"cat > /tmp/probe.sh <<'EOF'\nrun \"fzf\" fzf\ntop\nvim file\nEOF\nbash /tmp/probe.sh",
+	"cat <<EOF > notes.md\n- never run watch npm test\nEOF",
+	'printf "%s\\n" "git rebase -i HEAD~3" > todo.txt',
+	"grep -rn 'vim ' docs/",
 ];
+
+// ...but the same commands in command position after data are still caught.
+for (const cmd of [
+	'echo "safe" && vim file.txt',
+	"cat <<'EOF'\nhello\nEOF\ntop",
+	"git commit -m 'msg' && git rebase -i HEAD~2",
+	'"vim" file.txt',
+]) {
+	check(`blocks ${JSON.stringify(cmd)}`, () => assert.equal(decidePreventStuck(cmd).action, "block"));
+}
 
 for (const cmd of allowed) {
 	check(`allows ${cmd}`, () => assert.notEqual(decidePreventStuck(cmd).action, "block"));

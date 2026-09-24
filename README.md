@@ -18,6 +18,10 @@ Everything here either opens `/dev/tty` directly or loops until killed:
 - `bun repl`, `deno repl`
 - `git rebase -i` / `git rebase --interactive` unless `GIT_SEQUENCE_EDITOR` or `git -c sequence.editor=...` is set inline (git falls back to `vi` for the todo list)
 
+## Only real invocations count
+
+Blocked command names are matched in command position only. Text inside quoted strings, `git commit -m` messages, `echo` arguments, and heredoc bodies is ignored, so `git commit -m "stop using vim"` or a script written via `cat <<'EOF'` is not blocked. The same command after `&&`, `;`, `|`, or a newline still is.
+
 ## What it deliberately does not block
 
 Verified to exit on their own with stdin `/dev/null` and a non-TTY stdout:
