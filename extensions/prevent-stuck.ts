@@ -1,56 +1,69 @@
 /**
  * pi-prevent-stuck
  *
- * Blocks or rewrites bash tool commands that are likely to hang a coding agent
- * because they need a terminal UI, pager, editor, password prompt, login prompt,
- * watch loop, or REPL.
+ * Blocks or rewrites bash tool commands that actually hang a coding agent.
+ *
+ * pi runs the bash tool with stdin=/dev/null and stdout/stderr as pipes. In that
+ * environment most "interactive" programs exit on their own: REPLs (python, node,
+ * irb, sqlite3, psql...) hit EOF and quit; pagers (less, more, man) behave like cat
+ * because stdout is not a TTY; tmux/screen/htop/sudo/docker login error out with
+ * "not a terminal". Those are NOT blocked.
+ *
+ * What does hang is anything that opens /dev/tty directly or loops until killed:
+ * full-screen editors, top, fzf/peco, watch, `bun repl`, and `git rebase -i`
+ * with no editor override (git falls back to vi).
  */
 
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const NON_INTERACTIVE_GIT_ENV = "GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat GIT_EDITOR=: EDITOR=: VISUAL=:";
 
-const BLOCKED_COMMANDS: Record<string, string> = {
-	vi: "opens a full-screen editor",
-	vim: "opens a full-screen editor",
-	nvim: "opens a full-screen editor",
-	nano: "opens a full-screen editor",
-	pico: "opens a full-screen editor",
-	emacs: "opens a full-screen editor",
-	emacsclient: "opens an editor/client session",
-	less: "opens an interactive pager",
-	more: "opens an interactive pager",
-	most: "opens an interactive pager",
-	man: "opens documentation in an interactive pager",
-	info: "opens documentation in an interactive browser/pager",
-	top: "opens an interactive process monitor",
-	htop: "opens an interactive process monitor",
-	btop: "opens an interactive process monitor",
-	watch: "runs until interrupted",
-	tmux: "opens or controls an interactive terminal multiplexer",
-	screen: "opens or controls an interactive terminal multiplexer",
-	fzf: "opens an interactive fuzzy finder",
-	peco: "opens an interactive selector",
-	python: "starts a REPL when run without a script or command",
-	python3: "starts a REPL when run without a script or command",
-	python2: "starts a REPL when run without a script or command",
-	node: "starts a REPL when run without a script or command",
-	deno: "starts a REPL when run without a script or command",
-	bun: "starts a REPL when run without a script or command",
-	irb: "starts a Ruby REPL",
-	pry: "starts a Ruby REPL",
-	php: "starts an interactive shell with -a",
-	psql: "starts an interactive database shell unless given a command/file",
-	mysql: "starts an interactive database shell unless given a command/file",
-	mariadb: "starts an interactive database shell unless given a command/file",
-	sqlite3: "starts an interactive database shell unless given a command or input",
-	"redis-cli": "starts an interactive Redis shell unless given a command",
-	ssh: "opens an interactive remote shell when no remote command is provided",
-	sftp: "opens an interactive file transfer shell",
-	ftp: "opens an interactive file transfer shell",
+type Args = string[];
+
+interface BlockRule {
+	why: string;
+	/** Return true when this invocation is known to be non-interactive. */
+	allowIf?: (args: Args) => boolean;
+}
+
+const VERSION_OR_HELP = (args: Args) => args.some((a) => a === "--version" || a === "-v" || a === "-V" || a === "--help" || a === "-h");
+const has = (args: Args, ...flags: string[]) => args.some((a) => flags.includes(a));
+
+// vim/nvim: -es / -Es (ex silent) is the scripted mode; also -e with -s.
+const vimScripted = (args: Args) => VERSION_OR_HELP(args) || args.some((a) => /^-[eE]s$/.test(a)) || (has(args, "-e", "-E") && has(args, "-s"));
+
+const BLOCKED_COMMANDS: Record<string, BlockRule> = {
+	vi: { why: "opens a full-screen editor", allowIf: vimScripted },
+	vim: { why: "opens a full-screen editor", allowIf: vimScripted },
+	nvim: { why: "opens a full-screen editor", allowIf: (a) => vimScripted(a) || has(a, "--headless") },
+	nano: { why: "opens a full-screen editor" },
+	pico: { why: "opens a full-screen editor" },
+	emacs: {
+		why: "opens a full-screen editor",
+		allowIf: (a) => VERSION_OR_HELP(a) || has(a, "--batch", "-batch", "--script", "-script"),
+	},
+	emacsclient: {
+		why: "blocks until the buffer is closed in the Emacs server",
+		allowIf: (a) => VERSION_OR_HELP(a) || has(a, "-n", "--no-wait", "-e", "--eval"),
+	},
+	top: {
+		why: "opens an interactive process monitor",
+		// macOS: top -l N (log mode). Linux: top -b (batch), usually with -n N.
+		allowIf: (a) => VERSION_OR_HELP(a) || has(a, "-l", "-b") || a.some((x) => /^-[a-zA-Z]*[lb][a-zA-Z0-9]*$/.test(x)),
+	},
+	watch: { why: "runs until interrupted", allowIf: VERSION_OR_HELP },
+	fzf: {
+		why: "opens an interactive fuzzy finder",
+		allowIf: (a) => VERSION_OR_HELP(a) || has(a, "-f", "--filter") || a.some((x) => x.startsWith("--filter=") || x.startsWith("-f")),
+	},
+	peco: { why: "opens an interactive selector", allowIf: VERSION_OR_HELP },
 };
 
-const WRAPPERS = new Set(["sudo", "time", "command", "builtin", "nice", "stdbuf", "env"]);
+// Interpreters whose bare form exits on EOF, but whose explicit `repl` subcommand
+// may install/start a long-lived REPL (observed: `bun repl` hangs).
+const REPL_SUBCOMMANDS = new Set(["bun", "deno"]);
+
+const WRAPPERS = new Set(["sudo", "time", "command", "builtin", "nice", "stdbuf", "env", "timeout"]);
 const GIT_OPTS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
 
 export type PreventStuckDecision =
@@ -84,6 +97,8 @@ function commandTokenIndex(parts: string[]): number {
 		}
 		if (WRAPPERS.has(t)) {
 			i++;
+			// `timeout 5 cmd` — skip the duration operand too.
+			if (t === "timeout" && parts[i] && /^\d/.test(parts[i])) i++;
 			continue;
 		}
 		// Skip simple wrapper flags, e.g. sudo -n, env -u X, time -p.
@@ -144,62 +159,6 @@ function hasNonInteractiveGitPrefix(command: string): boolean {
 	return trimmed.startsWith(NON_INTERACTIVE_GIT_ENV) || /\bGIT_TERMINAL_PROMPT=0\b/.test(trimmed);
 }
 
-function phpIsInteractive(parts: string[], idx: number): boolean {
-	return parts.slice(idx + 1).includes("-a");
-}
-
-function pythonLikeIsInteractive(parts: string[], idx: number): boolean {
-	const args = parts.slice(idx + 1);
-	return args.length === 0 || !args.some((a) => a === "-c" || a === "-m" || !a.startsWith("-"));
-}
-
-function nodeLikeIsInteractive(parts: string[], idx: number): boolean {
-	const args = parts.slice(idx + 1);
-	return args.length === 0 || !args.some((a) => a === "-e" || a === "--eval" || !a.startsWith("-"));
-}
-
-function databaseShellIsInteractive(command: string, parts: string[], idx: number): boolean {
-	// `psql -c`, `mysql -e`, `sqlite3 db 'select 1'`, redirects, and pipes are non-interactive enough.
-	if (/[|<]/.test(command)) return false;
-	const name = commandName(parts);
-	const args = parts.slice(idx + 1);
-	if (args.some((a) => a === "-c" || a === "--command" || a === "-e" || a.startsWith("--execute=") || a === "-f" || a.startsWith("--file="))) return false;
-	if (name === "sqlite3") {
-		const positional = args.filter((a) => !a.startsWith("-"));
-		return positional.length < 2;
-	}
-	return true;
-}
-
-function redisCliIsInteractive(command: string, parts: string[], idx: number): boolean {
-	if (/[|<]/.test(command)) return false;
-	const args = parts.slice(idx + 1).filter((a) => !a.startsWith("-"));
-	return args.length === 0;
-}
-
-function sshIsInteractive(parts: string[], idx: number): boolean {
-	const args = parts.slice(idx + 1);
-	let nonOptionArgs = 0;
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i];
-		if (["-b", "-c", "-D", "-E", "-F", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"].includes(a)) {
-			i++;
-			continue;
-		}
-		if (a.startsWith("-")) continue;
-		nonOptionArgs++;
-	}
-	return nonOptionArgs <= 1;
-}
-
-function dockerLoginIsInteractive(parts: string[], idx: number): boolean {
-	if (parts[idx] !== "docker") return false;
-	const sub = parts[idx + 1];
-	if (sub !== "login") return false;
-	const args = parts.slice(idx + 2);
-	return !args.some((a) => a === "--password-stdin" || a === "-p" || a === "--password" || a.startsWith("--password="));
-}
-
 function segmentBlockReason(segment: string): string | undefined {
 	if (isInteractiveRebaseSegment(segment)) {
 		return "Interactive git rebase (-i/--interactive) is blocked because it opens an editor for the todo list. Use plain `git rebase`, `git rebase --onto`, or set an inline non-interactive sequence editor such as `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <base>`.";
@@ -210,21 +169,16 @@ function segmentBlockReason(segment: string): string | undefined {
 	const idx = commandTokenIndex(parts);
 	const name = commandName(parts);
 	if (!name) return undefined;
+	const args = parts.slice(idx + 1);
 
-	if (dockerLoginIsInteractive(parts, idx)) {
-		return "`docker login` is interactive unless credentials are supplied non-interactively. Use `docker login --username <user> --password-stdin` with stdin input.";
+	if (REPL_SUBCOMMANDS.has(name) && args[0] === "repl") {
+		return `\`${name} repl\` is blocked because it starts a long-lived REPL and can leave the agent stuck. Use \`${name} run\`, \`${name} -e\`, or a script file instead.`;
 	}
 
-	if (name === "php" && !phpIsInteractive(parts, idx)) return undefined;
-	if (["python", "python3", "python2"].includes(name) && !pythonLikeIsInteractive(parts, idx)) return undefined;
-	if (["node", "deno", "bun"].includes(name) && !nodeLikeIsInteractive(parts, idx)) return undefined;
-	if (["psql", "mysql", "mariadb", "sqlite3"].includes(name) && !databaseShellIsInteractive(segment, parts, idx)) return undefined;
-	if (name === "redis-cli" && !redisCliIsInteractive(segment, parts, idx)) return undefined;
-	if (name === "ssh" && !sshIsInteractive(parts, idx)) return undefined;
-
-	const why = BLOCKED_COMMANDS[name];
-	if (!why) return undefined;
-	return `\`${name}\` is blocked because it ${why} and can leave the agent stuck. Use a non-interactive command/flag instead.`;
+	const rule = BLOCKED_COMMANDS[name];
+	if (!rule) return undefined;
+	if (rule.allowIf?.(args)) return undefined;
+	return `\`${name}\` is blocked because it ${rule.why} and can leave the agent stuck. Use a non-interactive command/flag instead.`;
 }
 
 export function decidePreventStuck(command: string): PreventStuckDecision {

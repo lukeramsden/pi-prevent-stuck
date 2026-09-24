@@ -1,23 +1,31 @@
 # @lukeramsden/pi-prevent-stuck
 
-A [pi](https://github.com/earendil-works/pi) extension that keeps coding agents out of known shell traps: interactive editors, pagers, REPLs, terminal UIs, watch loops, prompt-only logins, and interactive git rebase.
+A [pi](https://github.com/earendil-works/pi) extension that keeps coding agents out of shell commands that actually hang: full-screen editors, `top`, fuzzy finders, `watch` loops, and interactive git rebase.
 
 ## Why
 
-Agents run shell commands through a non-interactive tool boundary. Commands that wait for a full-screen UI, a pager, an editor, a password/login prompt, a REPL, or an interrupt can hang the run until a timeout.
+pi runs the bash tool with stdin as `/dev/null` and stdout/stderr as pipes. In that environment most "interactive" programs exit on their own, so blocking them only gets in the agent's way. This extension blocks only what was verified to hang in that exact environment.
 
 ## What it blocks
 
-Conservative default blocks include:
+Everything here either opens `/dev/tty` directly or loops until killed:
 
 - Editors: `vi`, `vim`, `nvim`, `nano`, `pico`, `emacs`, `emacsclient`
-- Pagers/help browsers: `less`, `more`, `most`, `man`, `info`
-- TUIs and interrupt-only loops: `top`, `htop`, `btop`, `watch`, `tmux`, `screen`, `fzf`, `peco`
-- REPLs when run without a script/command: `python`, `python3`, `node`, `deno`, `bun`; plus `irb`, `pry`, and `php -a`
-- Interactive database/shell clients unless given a command/file/stdin: `psql`, `mysql`, `mariadb`, `sqlite3`, `redis-cli`
-- Remote/file-transfer shells: `ssh` without a remote command, `sftp`, `ftp`
-- Prompt-only Docker auth: `docker login` unless credentials are provided with `--password-stdin` or `--password`
-- `git rebase -i` / `git rebase --interactive` unless `GIT_SEQUENCE_EDITOR` or `git -c sequence.editor=...` is set inline
+  - allowed: `--version`, `vim -es`, `nvim --headless`, `emacs --batch`/`--script`, `emacsclient -n`/`-e`
+- `top` — allowed in batch modes: `top -l 1` (macOS), `top -b -n 1` (Linux)
+- `watch`
+- `fzf`, `peco` — allowed: `--version`, `fzf --filter`/`-f`
+- `bun repl`, `deno repl`
+- `git rebase -i` / `git rebase --interactive` unless `GIT_SEQUENCE_EDITOR` or `git -c sequence.editor=...` is set inline (git falls back to `vi` for the todo list)
+
+## What it deliberately does not block
+
+Verified to exit on their own with stdin `/dev/null` and a non-TTY stdout:
+
+- REPLs: `python`, `node`, `irb`, `sqlite3`, `psql`, `mysql`, `redis-cli`, `php -a` — they read EOF and quit, even with `-i`
+- Pagers: `less`, `more`, `man` — behave like `cat` when stdout is not a TTY
+- `tmux`, `screen`, `htop`, `sudo` (without `-n`), `docker login` — error out with "not a terminal"
+- `ssh`, `sftp` — no PTY is allocated, so no interactive shell starts
 
 ## Git hardening
 
@@ -48,10 +56,10 @@ Blocked:
 ```bash
 git rebase -i HEAD~3
 vim src/app.ts
-less huge.log
-docker login -u luke
-ssh prod-box
+top
+ls | fzf
 watch npm test
+bun repl
 ```
 
 Allowed or rewritten:
@@ -59,10 +67,11 @@ Allowed or rewritten:
 ```bash
 git log -n 20                 # rewritten with GIT_PAGER=cat
 GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash main
-docker login --username foo --password-stdin < token.txt
-python -c 'print("ok")'
-psql -c 'select 1'
-ssh prod-box 'uname -a'
+python3 --version
+node                          # exits immediately on EOF
+less huge.log                 # acts like cat
+top -l 1
+vim -es -c 'wq' file.txt
 ```
 
 ## Verify
@@ -73,10 +82,9 @@ npm run verify
 
 ## Research notes
 
-- Git documents `--no-pager`, `GIT_PAGER=cat`, `GIT_EDITOR`, `GIT_ASKPASS`, and `GIT_TERMINAL_PROMPT=0` for non-interactive behavior.
-- Git documents `sequence.editor` and `GIT_SEQUENCE_EDITOR` for `git rebase -i` todo editing.
-- Docker documents `docker login --password-stdin` as the non-interactive login path.
-- CircleCI documents that non-interactive shells can time out on prompts and pagers, and recommends disabling pagination such as with `git --no-pager`.
+- pi spawns the bash tool with `stdio: ["ignore", "pipe", "pipe"]` on Unix (`core/tools/bash.ts`), so stdin is `/dev/null` and stdout is never a TTY.
+- The block list was built by running each candidate under `timeout 3 cmd </dev/null 2>&1 | ...` and keeping only the ones that hit the timeout.
+- Git documents `--no-pager`, `GIT_PAGER=cat`, `GIT_EDITOR`, `GIT_ASKPASS`, and `GIT_TERMINAL_PROMPT=0` for non-interactive behavior, and `sequence.editor` / `GIT_SEQUENCE_EDITOR` for `git rebase -i` todo editing.
 
 ## License
 

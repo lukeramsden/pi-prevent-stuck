@@ -20,43 +20,91 @@ console.log("prevent-stuck extension verification\n");
 check("default export is a factory", () => assert.equal(typeof factory, "function"));
 check("exports decision helper", () => assert.equal(typeof decidePreventStuck, "function"));
 
+// Verified to hang with stdin=/dev/null and stdout=pipe (how pi runs bash):
+// they open /dev/tty directly or loop until killed.
 const blocks = [
 	"git rebase -i HEAD~3",
 	"git rebase --interactive main",
 	"echo ok && git -C repo rebase -ir main",
 	"vim src/app.ts",
-	"less huge.log",
-	"man git",
+	"nvim src/app.ts",
+	"nano notes.txt",
+	"emacs file.el",
+	"emacsclient file.el",
 	"top",
+	"sudo top",
+	"timeout 5 top",
 	"watch npm test",
-	"python",
-	"node",
-	"php -a",
-	"psql mydb",
-	"mysql -u root",
-	"redis-cli",
-	"docker login -u luke",
-	"ssh prod-box",
+	"fzf",
+	"ls | fzf",
+	"peco",
+	"bun repl",
+	"deno repl",
 ];
 
 for (const cmd of blocks) {
 	check(`blocks ${cmd}`, () => assert.equal(decidePreventStuck(cmd).action, "block"));
 }
 
+// Verified to exit on their own in the same environment.
 const allowed = [
 	"GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash main",
 	"git -c sequence.editor=true rebase -i main",
+	// editors in scripted/version modes
+	"vim --version",
+	"vim -es -c 'wq' file.txt",
+	"nvim --headless -c 'q'",
+	"emacs --batch -l build.el",
+	"emacsclient -n file.txt",
+	"emacsclient -e '(+ 1 2)'",
+	// process monitors in batch modes
+	"top -l 1",
+	"top -b -n 1",
+	"top -bn1",
+	// fuzzy finders in filter/version modes
+	"fzf --version",
+	"printf 'a\\nb' | fzf --filter a",
+	"printf 'a\\nb' | fzf -f a",
+	// REPLs: EOF on stdin makes them exit immediately
+	"python",
+	"python3",
+	"python3 -i",
+	"python3 --version && command -v uv || true",
+	"python3 -V; command -v cc || true",
+	"'/usr/bin/python3' -V",
+	"python3 -m venv .venv",
 	"python -c 'print(1)'",
-	"python script.py",
+	"node",
+	"node -i",
+	"node --version",
 	"node -e 'console.log(1)'",
-	"node script.js",
-	"php script.php",
-	"psql -c 'select 1'",
-	"mysql -e 'select 1'",
+	"bun",
+	"bun --version",
+	"deno --version",
+	"irb",
+	"php -a",
+	// pagers behave like cat when stdout is not a TTY
+	"less huge.log",
+	"more huge.log",
+	"man git",
+	// database shells exit on EOF
+	"psql mydb",
+	"mysql -u root",
+	"sqlite3 db.sqlite",
 	"sqlite3 db.sqlite 'select 1'",
-	"redis-cli ping",
-	"docker login --username foo --password-stdin < token.txt",
+	"redis-cli",
+	// multiplexers/TUIs error out without a terminal; detached forms are legit
+	"tmux new -d -s work",
+	"tmux ls",
+	"screen -dmS x true",
+	"htop",
+	// no PTY is allocated, so no interactive shell
+	"ssh prod-box",
 	"ssh prod-box 'uname -a'",
+	"sftp prod-box",
+	// errors out: "cannot perform an interactive login from a non-TTY device"
+	"docker login -u luke",
+	"docker login --username foo --password-stdin < token.txt",
 ];
 
 for (const cmd of allowed) {
